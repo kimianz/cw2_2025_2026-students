@@ -121,23 +121,79 @@ class CausalSelfAttention(nn.Module):
                 attentions: (optional) Tensor of shape (B, nh, T, T) where nh is the number of heads.
         """
         B, T, C = x.size()
+        # Calculate the number of heads (nh) and the size of each head (hs)
+        nh = self.n_head
+        hs = C // nh
+
         ### Your code here (~8-15 lines) ###
-        raise NotImplementedError("Implement the forward method in CausalSelfAttention in model.py")
+        #raise NotImplementedError("Implement the forward method in CausalSelfAttention in model.py")
+
         # Step 1: Calculate query, key, values for all heads
         # (B, nh, T, hs)
+        """
+            The output (B, T, C) is reshaped to (B, T, nh, hs). Then, we transpose it to (B, nh, T, hs) 
+            because PyTorch's batched matrix multiplication (the '@' operator) expects the heads (nh) 
+            to be the second dimension to enable parallel computation across all heads and batches
+        """
+        k = self.key(x).view(B, T, nh, hs).transpose(1, 2)
+        q = self.query(x).view(B, T, nh, hs).transpose(1, 2)
+        v = self.value(x).view(B, T, nh, hs).transpose(1, 2)
       
         # Step 2: Compute attention scores
         # Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        # K is transposed on its last two dimensions (-2, -1) for the dot product.
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(hs))
+
 
         # Step 3: Masking out the future tokens (causal) and softmax
+        causal_mask = self.mask[:, :, :T, :T] 
+        
+        """
+            Mask future tokens: We use .masked_fill() to replace scores for future positions (where mask == 0) 
+            with float('-inf') which is necessary to ensure their attention probability becomes zero after Softmax
+        """
+        att = att.masked_fill(causal_mask == 0, float('-inf'))
+        
+        # Apply Softmax on the last dimension to normalize scores into attention probability weights
+        att = F.softmax(att, dim=-1)
+        # Apply dropout for regularization
+        attention = self.attn_drop(att)
+
+        # مرحله ۴: محاسبه خروجی توجه
+        # وزن‌های توجه نرمال‌شده (attention) را در ماتریس Value ضرب می‌کنیم تا Context Vector نهایی به دست آید.
+        # Step 4: Compute the final attention output (Context Vector).
+       
+
+        # مرحله ۵: ترکیب مجدد سرها و پروجکشن نهایی
+        # خروجی (y) را به شکل (B, T, nh, hs) برگردانده و سپس ابعاد سرها را در هم ادغام می‌کنیم 
+        # تا به ابعاد اصلی (B, T, C) بازگردیم. از .contiguous() برای اطمینان از آرایش صحیح حافظه قبل از .view() استفاده می‌شود.
+        # Step 5: Re-assemble all head outputs side by side.
+       
+
+        # مرحله ۶: پروجکشن نهایی و Dropout
+        # خروجی نهایی از آخرین لایه خطی (self.proj) عبور کرده و Dropout اعمال می‌شود.
+        
 
         # Step 4: Compute the attention output
         # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        # We calculate the weighted sum of the Value matrix (v) using the normalized attention weights
+        y = attention @ v 
 
         # Step 5: re-assemble all head outputs side by side
         # (B, T, nh, hs) -> (B, T, C)
+        """
+            Transpose back to (B, T, nh, hs). We use .contiguous().view() to effectively concatenate the heads
+           (nh * hs) back into the original embedding dimension (C) resulting in shape (B, T, C)
+        """
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
 
         # Step 6: output projection + dropout
+        """
+            In step 6 we apply the final output linear projection and residual dropout.
+            The result 'y' passes through the final linear projection (self.proj) and residual dropout
+        """
+        y = self.resid_drop(self.proj(y))
+
         ### End of your code ###
         return GPTAttentionOutput(output=y, attentions=attention)
 
@@ -323,15 +379,46 @@ class GPT(nn.Module):
 
             if do_sample:
                 ### Your code here (~5-12 lines) ###
-                raise NotImplementedError("Implement sampling in the generate method in model.py (MSc students only)")
+                #raise NotImplementedError("Implement sampling in the generate method in model.py (MSc students only)")
+
                 # 1. If top_k is not None, crop the logits to only the top k options
+                """
+                    In step 1 we apply Top-K filtering if self.config.top_k is specified.
+                    This constrains the sampling space to the top 'k' most probable tokens 
+                    by setting all others to -float('inf')
+                """
+                if top_k is not None:
+                    # Assumes top_k_logits is available/imported
+                    logits = top_k_logits(logits, top_k)
 
                 # 2. If top_p is not None, crop the logits to only the top p options
+                """
+                    Step 2: Apply Top-P (Nucleus) filtering if self.config.top_p is specified.
+                    This applies dynamic filtering, selecting the smallest set of tokens whose cumulative 
+                    probability exceeds 'top_p', preventing sampling from very low probability tokens.
+                """
+                if top_p is not None:
+                    # Assumes top_p_logits is available/imported
+                    logits = top_p_logits(logits, top_p)
 
                 # apply softmax to convert logits to (normalized) probabilities
                 # sample from the distribution using the re-normalized probabilities
+                """
+                    Now we convert filtered logits to probabilities and sample a token.
+                    Apply softmax to the filtered logits to obtain the normalized probability distribution.
+                """
+                # Convert filtered logits to probabilities and sample the next token.
+                probs = F.softmax(logits, dim=-1)
+                # Sample from the distribution (this defines predicted_id).
+                predicted_id = torch.multinomial(probs, num_samples=1) # ⬅️ محاسبه توکن
 
-                # append sampled index to the running sequence and continue
+                """
+                    In step 4 we append the sampled token ID to the running sequence.
+                    Concatenate the newly predicted token ID to the input_ids sequence for the next decoding step.
+                """
+                # Append sampled index to the running sequence and continue
+                input_ids = torch.cat((input_ids, predicted_id), dim=1) # ⬅️ الحاق توکن
+                
                 ### End of your code ###
             else:
                 # greedily take the argmax
