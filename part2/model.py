@@ -159,19 +159,6 @@ class CausalSelfAttention(nn.Module):
         # Apply dropout for regularization
         attention = self.attn_drop(att)
 
-        # مرحله ۴: محاسبه خروجی توجه
-        # وزن‌های توجه نرمال‌شده (attention) را در ماتریس Value ضرب می‌کنیم تا Context Vector نهایی به دست آید.
-        # Step 4: Compute the final attention output (Context Vector).
-       
-
-        # مرحله ۵: ترکیب مجدد سرها و پروجکشن نهایی
-        # خروجی (y) را به شکل (B, T, nh, hs) برگردانده و سپس ابعاد سرها را در هم ادغام می‌کنیم 
-        # تا به ابعاد اصلی (B, T, C) بازگردیم. از .contiguous() برای اطمینان از آرایش صحیح حافظه قبل از .view() استفاده می‌شود.
-        # Step 5: Re-assemble all head outputs side by side.
-       
-
-        # مرحله ۶: پروجکشن نهایی و Dropout
-        # خروجی نهایی از آخرین لایه خطی (self.proj) عبور کرده و Dropout اعمال می‌شود.
         
 
         # Step 4: Compute the attention output
@@ -389,7 +376,8 @@ class GPT(nn.Module):
                 """
                 if top_k is not None:
                     # Assumes top_k_logits is available/imported
-                    logits = top_k_logits(logits, top_k)
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = float('-inf')
 
                 # 2. If top_p is not None, crop the logits to only the top p options
                 """
@@ -399,7 +387,19 @@ class GPT(nn.Module):
                 """
                 if top_p is not None:
                     # Assumes top_p_logits is available/imported
-                    logits = top_p_logits(logits, top_p)
+                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+                    # Remove tokens with cumulative probability above the threshold (top_p)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0 # Ensure the most probable token is never removed
+
+                    # scatter indices to original positions
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        1, sorted_indices, sorted_indices_to_remove
+                    )
+                    logits[indices_to_remove] = float('-inf')
 
                 # apply softmax to convert logits to (normalized) probabilities
                 # sample from the distribution using the re-normalized probabilities
@@ -410,14 +410,14 @@ class GPT(nn.Module):
                 # Convert filtered logits to probabilities and sample the next token.
                 probs = F.softmax(logits, dim=-1)
                 # Sample from the distribution (this defines predicted_id).
-                predicted_id = torch.multinomial(probs, num_samples=1) # ⬅️ محاسبه توکن
+                predicted_id = torch.multinomial(probs, num_samples=1)
 
                 """
                     In step 4 we append the sampled token ID to the running sequence.
                     Concatenate the newly predicted token ID to the input_ids sequence for the next decoding step.
                 """
                 # Append sampled index to the running sequence and continue
-                input_ids = torch.cat((input_ids, predicted_id), dim=1) # ⬅️ الحاق توکن
+                input_ids = torch.cat((input_ids, predicted_id), dim=1)
                 
                 ### End of your code ###
             else:
@@ -425,7 +425,6 @@ class GPT(nn.Module):
                 predicted_id = torch.argmax(logits, dim=-1, keepdim=True)
                 # append predicted index to the running sequence and continue
                 input_ids = torch.cat((input_ids, predicted_id), dim=1)
-
             if output.attentions is not None and attentions is not None:
                 attentions.append(output.attentions)
 
